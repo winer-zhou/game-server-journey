@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -129,6 +131,14 @@ func broadcastToRoom(room string, msg string) {
 // handleConn
 // ════════════════════════════════════════════════════════════
 func handleConn(ctx context.Context, conn net.Conn) {
+
+	// ══════ 新增：捕获 panic，防止一个连接崩掉整个服务器 ══════
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("handleConn 崩溃（已隔离）:", r)
+		}
+	}()
+
 	defer conn.Close()
 	defer wg.Done() // ← 结束时通知"我退了"
 
@@ -328,6 +338,49 @@ func handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// ══════════════════════════════════════════════════════════
+// startHTTP：启动 HTTP 监控服务（监听 8081）
+// ══════════════════════════════════════════════════════════
+func startHTTP() {
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	})
+
+	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		type clientInfo struct {
+			Name string `json:"name"`
+			Room string `json:"room"`
+			X    int    `json:"x"`
+			Y    int    `json:"y"`
+		}
+
+		mu.RLock()
+		list := make([]clientInfo, 0, len(clients))
+		for _, c := range clients {
+			list = append(list, clientInfo{
+				Name: c.Name,
+				Room: c.Room,
+				X:    c.X,
+				Y:    c.Y,
+			})
+		}
+		mu.RUnlock()
+
+		resp := map[string]any{
+			"online":  len(list),
+			"clients": list,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	fmt.Println("HTTP 监控启动，监听 8081")
+	if err := http.ListenAndServe(":8081", nil); err != nil {
+		fmt.Println("HTTP 启动失败:", err)
+	}
+}
+
 // ════════════════════════════════════════════════════════════
 // main
 // ════════════════════════════════════════════════════════════
@@ -346,6 +399,8 @@ func main() {
 		return
 	}
 	fmt.Println("Redis 已连接 ✅")
+
+	go startHTTP() // ← 启动 HTTP 监控（必须有 go！）
 	// ═════════════════════════
 
 	// ① 监听 Ctrl+C
