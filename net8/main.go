@@ -339,41 +339,89 @@ func handleConn(ctx context.Context, conn net.Conn) {
 }
 
 // ══════════════════════════════════════════════════════════
-// startHTTP：启动 HTTP 监控服务（监听 8081）
+// clientInfo：HTTP 接口输出的玩家信息
+// ══════════════════════════════════════════════════════════
+type clientInfo struct {
+	Name string `json:"name"`
+	Room string `json:"room"`
+	X    int    `json:"x"`
+	Y    int    `json:"y"`
+}
+
+// ══════════════════════════════════════════════════════════
+// writeJSON：统一的 JSON 响应函数
+// ══════════════════════════════════════════════════════════
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+// ══════════════════════════════════════════════════════════
+// logMiddleware：中间件 —— 给任何 handler 加上"记录耗时"
+// ══════════════════════════════════════════════════════════
+// 参数 next：被包装的原始处理函数
+// 返回：一个新的处理函数（先执行 next，再打日志）
+func logMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now() // ① 记录开始时间
+		next(w, r)          // ② 执行真正的处理逻辑
+		fmt.Printf("[HTTP] %s %s  耗时 %v\n",
+			r.Method, r.URL.Path, time.Since(start).Round(time.Microsecond))
+		//                  ↑ 请求路径        ↑ 耗时（微秒精度）
+	}
+}
+
+// ══════════════════════════════════════════════════════════
+// handlerStatus：GET /status —— 全部在线玩家
+// ══════════════════════════════════════════════════════════
+func handlerStatus(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	list := make([]clientInfo, 0, len(clients))
+	for _, c := range clients {
+		list = append(list, clientInfo{c.Name, c.Room, c.X, c.Y})
+	}
+	mu.RUnlock()
+
+	writeJSON(w, map[string]any{
+		"online":  len(list),
+		"clients": list,
+	})
+}
+
+// ══════════════════════════════════════════════════════════
+// handlerRoom：GET /room/{name} —— 某个房间的玩家
+// ══════════════════════════════════════════════════════════
+func handlerRoom(w http.ResponseWriter, r *http.Request) {
+	// r.PathValue("name") 取出路径里 {name} 那一段
+	roomName := r.PathValue("name")
+
+	mu.RLock()
+	list := make([]clientInfo, 0)
+	for _, c := range clients {
+		if c.Room == roomName {
+			list = append(list, clientInfo{c.Name, c.Room, c.X, c.Y})
+		}
+	}
+	mu.RUnlock()
+
+	writeJSON(w, map[string]any{
+		"room":    roomName,
+		"online":  len(list),
+		"clients": list,
+	})
+}
+
+// ══════════════════════════════════════════════════════════
+// startHTTP：启动 HTTP 监控服务
 // ══════════════════════════════════════════════════════════
 func startHTTP() {
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// 注意路由里加上了 "GET " 前缀 —— 只响应 GET 请求
+	http.HandleFunc("GET /health", logMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
-	})
+	}))
 
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		type clientInfo struct {
-			Name string `json:"name"`
-			Room string `json:"room"`
-			X    int    `json:"x"`
-			Y    int    `json:"y"`
-		}
-
-		mu.RLock()
-		list := make([]clientInfo, 0, len(clients))
-		for _, c := range clients {
-			list = append(list, clientInfo{
-				Name: c.Name,
-				Room: c.Room,
-				X:    c.X,
-				Y:    c.Y,
-			})
-		}
-		mu.RUnlock()
-
-		resp := map[string]any{
-			"online":  len(list),
-			"clients": list,
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	})
+	http.HandleFunc("GET /status", logMiddleware(handlerStatus))
+	http.HandleFunc("GET /room/{name}", logMiddleware(handlerRoom))
 
 	fmt.Println("HTTP 监控启动，监听 8081")
 	if err := http.ListenAndServe(":8081", nil); err != nil {
